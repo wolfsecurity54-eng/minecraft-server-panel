@@ -1,0 +1,78 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logs
+logs/
+*.log
+
+# Runtime
+.env
+.env.local
+.env.*.local
+
+# Build outputs
+dist/
+build/
+out/
+coverage/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets - WICHTIG: API-Keys NIEMALS committen
+config/panel.json
+config/users.json
+config/ip-tracker.json
+config/state.json
+config/activity.json
+config/audit.json
+config/luckperms.json
+config/railway.json
+!config/.gitkeep
+
+# Minecraft runtime
+server/world/
+server/world_nether/
+server/world_the_end/
+server/logs/
+server/cache/
+server/libraries/
+server/versions/
+server/banned-*.json
+server/ops.json
+server/usercache.json
+server/whitelist.json
+server/session.lock
+server/*.dat
+server/*.dat_old
+server/paper-*.yml
+server/bukkit.yml
+server/spigot.yml
+server/commands.yml
+server/help.yml
+server/eula.txt
+server/server.properties
+server/version_history.json
+server/hs_err_pid*.log
+!server/.gitkeep
+
+# Backups
+backups/*.zip
+backups/*.tar.gz
+backups/*.tar
+
+# GitHub
+.github/
+node_modules/
+package-lock.json
