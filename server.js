@@ -42,7 +42,7 @@ const ACTIVITY_FILE = path.join(ROOT, 'config', 'activity.json');
 const AUDIT_FILE = path.join(ROOT, 'config', 'audit.json');
 const SESSION_SECRET = crypto.randomBytes(32).toString('hex');
 
-const PANEL_PORT = process.env.PANEL_PORT || 3000;
+const PANEL_PORT = process.env.PORT || process.env.PANEL_PORT || 3000;
 const RAILWAY_API_KEY = process.env.RAILWAY_API_KEY || null;
 const RAILWAY_PROJECT_ID = process.env.RAILWAY_PROJECT_ID || null;
 const RAILWAY_SERVICE_ID = process.env.RAILWAY_SERVICE_ID || null;
