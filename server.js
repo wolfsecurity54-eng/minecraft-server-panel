@@ -4219,7 +4219,9 @@ app.post('/api/railway/setup-env', verifyCsrf, requireAuth, requirePermission('u
   try {
     const secrets = crypto.randomBytes(32).toString('hex');
     await railwayManager.setVariable('SESSION_SECRET', secrets);
-    await railwayManager.setVariable('PANEL_PORT', '3000');
+    // NOTE: Don't set PANEL_PORT here — Railway injects PORT automatically.
+    // Setting PANEL_PORT to a hardcoded value masks the real PORT and
+    // causes healthcheck failures against /api/health.
     addActivity('🔧 Railway-Umgebungsvariablen eingerichtet', 'info');
     res.json({ success: true });
   } catch (e) {
@@ -4416,7 +4418,7 @@ addActivity('🛡️ Security-Systeme aktiv: IP-Tracking, Brute-Force, Anti-Chea
 log('=== Minecraft Server Control Panel gestartet ===');
 
 httpServer.listen(PANEL_PORT, '0.0.0.0', () => {
-  log(`Panel läuft auf http://0.0.0.0:${PANEL_PORT}`);
+  log(`Panel lauscht auf 0.0.0.0:${PANEL_PORT} (PORT=${process.env.PORT || 'unset'}, PANEL_PORT=${process.env.PANEL_PORT || 'unset'})`);
   console.log('');
   console.log('╔════════════════════════════════════════════════╗');
   console.log('║   Minecraft Server Control Panel               ║');
