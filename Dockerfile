@@ -1,4 +1,4 @@
-FROM eclipse-temurin:21-jdk-jammy
+FROM eclipse-temurin:22-jdk-jammy
 
 # Grundlegende Pakete
 RUN apt-get update && apt-get install -y --no-install-recommends \
