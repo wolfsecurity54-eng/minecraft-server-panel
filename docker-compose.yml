@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  minecraft-panel:
+    build: .
+    container_name: minecraft-panel
+    restart: unless-stopped
+    ports:
+      - "3000:3000"      # Web-Panel
+      - "25565:25565"    # Java Minecraft
+      - "19132:19132/udp" # Bedrock (Geyser)
+      - "25575:25575"    # RCON
+    environment:
+      - NODE_ENV=production
+      - PANEL_PORT=3000
+      - JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+    volumes:
+      - ./server:/app/server
+      - ./backups:/app/backups
+      - ./config:/app/config
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
