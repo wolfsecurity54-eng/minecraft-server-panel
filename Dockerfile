@@ -21,15 +21,11 @@ RUN npm install --omit=dev && npm cache clean --force
 # Quellcode kopieren
 COPY . .
 
-# Verzeichnisse erstellen (Railway Volumes werden gemountet)
+# Verzeichnisse erstellen
 RUN mkdir -p server/plugins server/world backups logs config web/public
 
-# Server-Ports
+# Server-Ports (ALLE verfügbar machen)
 EXPOSE 3000 25565 19132/udp 25575
 
-# Health-Check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD curl -f http://127.0.0.1:3000/api/health || exit 0
-
-# Server starten
+# Server starten (kein HEALTHCHECK im Dockerfile, Railway macht das selbst)
 CMD ["node", "server.js"]
