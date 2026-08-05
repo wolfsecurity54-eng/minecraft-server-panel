@@ -21,7 +21,7 @@ RUN npm install --omit=dev && npm cache clean --force
 # Quellcode kopieren
 COPY . .
 
-# Verzeichnisse erstellen
+# Verzeichnisse erstellen (Railway Volumes werden in /app/server, /app/backups, /app/config gemountet)
 RUN mkdir -p server/plugins server/world backups logs config web/public
 
 # Server-Ports
@@ -30,9 +30,6 @@ EXPOSE 3000 25565 19132/udp 25575
 # Health-Check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD curl -f http://localhost:3000/api/health || exit 1
-
-# Volumes für persistente Daten
-VOLUME ["/app/server", "/app/backups", "/app/config", "/app/logs"]
 
 # Server starten
 CMD ["node", "server.js"]
