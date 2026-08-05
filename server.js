@@ -4290,6 +4290,167 @@ app.get('/api/performance', requireAuth, requirePermission('system.info'), (req,
   res.json({ ...sys, alerts, server: status });
 });
 
+// ============================================================================
+// FILE-MANAGER (List, Read, Write, Upload, Versioning, Search, Snippets)
+// ============================================================================
+
+const FILE_VERSION_DIR = path.join(ROOT, 'config', 'file-versions');
+const FILE_MAX_VERSIONS = 5;
+const FILE_MAX_EDIT_SIZE = 10 * 1024 * 1024;
+const FILE_MAX_UPLOAD_SIZE = 100 * 1024 * 1024;
+const FILE_PROTECTED = new Set(['server.jar', 'eula.txt', 'package.json', 'package-lock.json', 'server.js']);
+const FILE_EDITABLE_EXTENSIONS = new Set(['txt', 'yml', 'yaml', 'json', 'properties', 'conf', 'config', 'ini', 'md', 'sh', 'bat', 'log', 'cfg', 'toml', 'xml', 'html', 'css', 'js', 'mcmeta', 'lang', 'nbt', 'dat', 'snbt', 'lck', 'dat_old', 'csv']);
+
+function isPathSafe(p) { try { return path.resolve(ROOT, p).startsWith(ROOT) && !p.includes('\0'); } catch (e) { return false; } }
+function getFileExt(f) { const i = f.lastIndexOf('.'); return i === -1 ? '' : f.slice(i + 1).toLowerCase(); }
+function isFileEditable(fp) { try { const s = fs.lstatSync(fp); return s.isFile() && s.size <= FILE_MAX_EDIT_SIZE && FILE_EDITABLE_EXTENSIONS.has(getFileExt(fp)); } catch (e) { return false; } }
+
+function buildFileInfo(fullPath, relativePath) {
+  try {
+    const ls = fs.lstatSync(fullPath);
+    if (ls.isSymbolicLink()) return { name: path.basename(fullPath), path: relativePath, fullPath, isSymlink: true, isProtected: true, error: 'Symbolische Links nicht unterstützt' };
+    const s = fs.statSync(fullPath);
+    const isDir = s.isDirectory();
+    const name = path.basename(fullPath);
+    const ext = getFileExt(name);
+    return { name, path: relativePath, fullPath, isDirectory: isDir, isFile: !isDir, isSymlink: false, size: isDir ? getDirSize(fullPath) : s.size, sizeFormatted: isDir ? formatBytes(getDirSize(fullPath)) : formatBytes(s.size), modified: s.mtime.getTime(), created: s.birthtime.getTime(), permissions: '0' + (s.mode & parseInt('777', 8)).toString(8), extension: ext, mimeType: isDir ? 'directory' : ext, isEditable: !isDir && isFileEditable(fullPath), isProtected: FILE_PROTECTED.has(name), isBinary: !isDir && !isFileEditable(fullPath), childrenCount: isDir ? fs.readdirSync(fullPath).length : 0 };
+  } catch (e) { return { name: path.basename(fullPath), path: relativePath, fullPath, error: e.message }; }
+}
+
+function saveFileVersion(filePath, username) {
+  try {
+    const h = crypto.createHash('sha1').update(filePath).digest('hex').slice(0, 16);
+    const vDir = path.join(FILE_VERSION_DIR, h); ensureDir(vDir);
+    const existing = fs.existsSync(vDir) ? fs.readdirSync(vDir).filter(f => f.startsWith('v')).map(f => parseInt(f.slice(1, 4))).filter(n => !isNaN(n)) : [];
+    const next = existing.length === 0 ? 1 : Math.max(...existing) + 1;
+    const content = fs.readFileSync(filePath);
+    const vFile = path.join(vDir, `v${String(next).padStart(3, '0')}.${Date.now()}.bak`);
+    fs.writeFileSync(vFile, content);
+    const meta = readJSON(path.join(vDir, 'meta.json'), { versions: [] });
+    meta.versions.push({ number: next, file: path.basename(vFile), timestamp: Date.now(), size: content.length, editor: username });
+    if (meta.versions.length > FILE_MAX_VERSIONS) { const old = meta.versions.splice(0, meta.versions.length - FILE_MAX_VERSIONS); old.forEach(v => { try { fs.unlinkSync(path.join(vDir, v.file)); } catch (e) {} }); }
+    writeJSON(path.join(vDir, 'meta.json'), meta);
+    return next;
+  } catch (e) { return null; }
+}
+
+function getFileVersions(filePath) { try { const h = crypto.createHash('sha1').update(filePath).digest('hex').slice(0, 16); const vDir = path.join(FILE_VERSION_DIR, h); if (!fs.existsSync(vDir)) return []; return readJSON(path.join(vDir, 'meta.json'), { versions: [] }).versions || []; } catch (e) { return []; } }
+function restoreFileVersion(filePath, versionNumber, username) {
+  try {
+    const h = crypto.createHash('sha1').update(filePath).digest('hex').slice(0, 16);
+    const vDir = path.join(FILE_VERSION_DIR, h);
+    const meta = readJSON(path.join(vDir, 'meta.json'), { versions: [] });
+    const v = meta.versions.find(x => x.number === versionNumber);
+    if (!v) return { success: false, error: 'Version nicht gefunden' };
+    if (!fs.existsSync(path.join(vDir, v.file))) return { success: false, error: 'Version-Datei fehlt' };
+    saveFileVersion(filePath, `${username} (pre-restore-v${versionNumber})`);
+    fs.writeFileSync(filePath, fs.readFileSync(path.join(vDir, v.file)));
+    return { success: true, restoredFrom: versionNumber };
+  } catch (e) { return { success: false, error: e.message }; }
+}
+
+app.get('/api/files/list', requireAuth, requirePermission('settings.view'), (req, res) => {
+  try {
+    const rel = req.query.path || '';
+    if (!isPathSafe(rel)) return res.status(403).json({ error: 'Ungültiger Pfad' });
+    const fp = path.resolve(ROOT, rel);
+    if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Nicht gefunden' });
+    if (!fs.lstatSync(fp).isDirectory()) return res.status(400).json({ error: 'Ist kein Verzeichnis' });
+    const items = fs.readdirSync(fp, { withFileTypes: true }).filter(e => !e.name.startsWith('.')).map(e => buildFileInfo(path.join(fp, e.name), path.join(rel, e.name)));
+    items.sort((a, b) => (a.isDirectory && !b.isDirectory) ? -1 : (!a.isDirectory && b.isDirectory) ? 1 : a.name.localeCompare(b.name));
+    res.json({ path: rel, items, total: items.length, parent: rel ? path.dirname(rel) : null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/files/tree', requireAuth, requirePermission('settings.view'), (req, res) => {
+  try {
+    const rel = req.query.path || ''; const depth = parseInt(req.query.maxDepth) || 3;
+    if (!isPathSafe(rel)) return res.status(403).json({ error: 'Ungültiger Pfad' });
+    const fp = path.resolve(ROOT, rel);
+    if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Nicht gefunden' });
+    const build = (p, d = 0) => { if (d > depth) return null; const l = fs.lstatSync(p); if (l.isSymbolicLink() || !l.isDirectory()) return null; const e = fs.readdirSync(p, { withFileTypes: true }).filter(x => !x.name.startsWith('.') && !x.isSymbolicLink()); return { name: path.basename(p), path: p.replace(ROOT, '').replace(/^\//, '') || '.', isDirectory: true, children: e.filter(x => x.isDirectory()).map(x => build(path.join(p, x.name), d + 1)).filter(Boolean), fileCount: e.filter(x => x.isFile()).length }; };
+    res.json({ tree: build(fp) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/files/read', requireAuth, requirePermission('settings.view'), (req, res) => {
+  try {
+    const rel = req.query.path || '';
+    if (!isPathSafe(rel)) return res.status(403).json({ error: 'Ungültiger Pfad' });
+    const fp = path.resolve(ROOT, rel);
+    if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Nicht gefunden' });
+    const s = fs.statSync(fp);
+    if (s.isDirectory()) return res.status(400).json({ error: 'Ist Verzeichnis' });
+    if (s.size > FILE_MAX_EDIT_SIZE) return res.status(413).json({ error: 'Zu groß' });
+    if (!isFileEditable(fp)) return res.status(415).json({ error: 'Nicht editierbar' });
+    const content = fs.readFileSync(fp, 'utf8');
+    const info = buildFileInfo(fp, rel);
+    const versions = getFileVersions(fp);
+    let validation = { valid: true };
+    if (info.extension === 'json') { try { JSON.parse(content); } catch (e) { validation = { valid: false, errors: [e.message] }; } }
+    res.json({ ...info, content, encoding: 'utf-8', lineCount: content.split('\n').length, versions: versions.length, versionList: versions.slice(-5), validation });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/files/write', verifyCsrf, requireAuth, requirePermission('settings.edit'), (req, res) => {
+  try {
+    const { path: rel, content, createBackup = true } = req.body;
+    if (!rel || typeof content !== 'string') return res.status(400).json({ error: 'Pfad und Inhalt erforderlich' });
+    if (!isPathSafe(rel)) return res.status(403).json({ error: 'Ungültiger Pfad' });
+    const fp = path.resolve(ROOT, rel);
+    const name = path.basename(fp);
+    if (FILE_PROTECTED.has(name) && req.user.role !== 'owner') return res.status(403).json({ error: 'Geschützt' });
+    if (Buffer.byteLength(content, 'utf8') > FILE_MAX_EDIT_SIZE) return res.status(413).json({ error: 'Inhalt zu groß' });
+    const v = fs.existsSync(fp) && createBackup ? saveFileVersion(fp, req.user.username) : null;
+    ensureDir(path.dirname(fp));
+    fs.writeFileSync(fp, content, 'utf8');
+    addAudit(req.user.username, 'file_write', { path: rel, size: content.length, version: v, ip: req.ip });
+    addActivity(`📝 Datei bearbeitet: ${rel}`, 'info');
+    res.json({ success: true, path: rel, version: v, size: content.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/files/mkdir', verifyCsrf, requireAuth, requirePermission('settings.edit'), (req, res) => {
+  try { const { path: rel, name } = req.body; if (!rel || !name) return res.status(400).json({ error: 'Pfad und Name erforderlich' }); if (!isPathSafe(rel) || name.includes('/') || name.includes('\\')) return res.status(400).json({ error: 'Ungültig' }); const fp = path.resolve(ROOT, rel, name); if (fs.existsSync(fp)) return res.status(400).json({ error: 'Existiert' }); fs.mkdirSync(fp, { recursive: true }); addAudit(req.user.username, 'file_mkdir', { path: rel, name, ip: req.ip }); res.json({ success: true, path: path.join(rel, name) }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/files/rename', verifyCsrf, requireAuth, requirePermission('settings.edit'), (req, res) => {
+  try { const { path: rel, newName } = req.body; if (!rel || !newName) return res.status(400).json({ error: 'Pfad und Name erforderlich' }); if (!isPathSafe(rel)) return res.status(403).json({ error: 'Ungültig' }); if (newName.includes('/') || newName.includes('\\') || newName.startsWith('.')) return res.status(400).json({ error: 'Ungültiger Name' }); const fp = path.resolve(ROOT, rel); const nfp = path.join(path.dirname(fp), newName); if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Nicht gefunden' }); if (fs.existsSync(nfp)) return res.status(400).json({ error: 'Ziel existiert' }); if (FILE_PROTECTED.has(path.basename(fp))) return res.status(403).json({ error: 'Geschützt' }); fs.renameSync(fp, nfp); addAudit(req.user.username, 'file_rename', { from: rel, to: newName, ip: req.ip }); res.json({ success: true, newPath: path.relative(ROOT, nfp) }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/files/delete', verifyCsrf, requireAuth, requirePermission('settings.edit'), (req, res) => {
+  try { const rel = req.query.path || req.body.path; if (!rel) return res.status(400).json({ error: 'Pfad erforderlich' }); if (!isPathSafe(rel)) return res.status(403).json({ error: 'Ungültig' }); const fp = path.resolve(ROOT, rel); if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Nicht gefunden' }); if (FILE_PROTECTED.has(path.basename(fp))) return res.status(403).json({ error: 'Geschützt' }); if (['server', 'config', 'plugins'].includes(rel)) return res.status(403).json({ error: 'Kritisch' }); const s = fs.statSync(fp); if (s.isDirectory()) fs.rmSync(fp, { recursive: true, force: true }); else fs.unlinkSync(fp); addAudit(req.user.username, 'file_delete', { path: rel, ip: req.ip }); addActivity(`🗑️ Gelöscht: ${rel}`, 'warning'); res.json({ success: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/files/download', requireAuth, requirePermission('settings.view'), (req, res) => {
+  try { const rel = req.query.path; if (!rel || !isPathSafe(rel)) return res.status(400).json({ error: 'Ungültig' }); const fp = path.resolve(ROOT, rel); if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Nicht gefunden' }); addAudit(req.user.username, 'file_download', { path: rel, ip: req.ip }); res.download(fp); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/files/zip', verifyCsrf, requireAuth, requirePermission('settings.edit'), async (req, res) => {
+  try { const { paths, name } = req.body; if (!Array.isArray(paths) || !paths.length) return res.status(400).json({ error: 'Pfade erforderlich' }); for (const p of paths) if (!isPathSafe(p)) return res.status(403).json({ error: `Ungültig: ${p}` }); const an = (name || 'archive').replace(/[^a-zA-Z0-9_\-.]/g, '_'); const target = path.join(BACKUP_DIR, `${an}_${Date.now()}.zip`); const out = fs.createWriteStream(target); const archive = new ZipArchive({ zlib: { level: 6 } }); out.on('close', () => { addAudit(req.user.username, 'file_zip', { paths, name: an, ip: req.ip }); res.json({ success: true, file: path.basename(target), size: archive.pointer() }); }); archive.on('error', e => res.status(500).json({ error: e.message })); archive.pipe(out); for (const p of paths) { const fp = path.resolve(ROOT, p); if (fs.existsSync(fp)) { const s = fs.statSync(fp); if (s.isDirectory()) archive.directory(fp, path.basename(fp)); else archive.file(fp, { name: path.basename(fp) }); } } archive.finalize(); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/files/upload', verifyCsrf, requireAuth, requirePermission('settings.edit'), require('multer')({ storage: require('multer').memoryStorage(), limits: { fileSize: FILE_MAX_UPLOAD_SIZE } }).array('files', 20), (req, res) => {
+  try { const rel = req.query.path || req.body.path || ''; if (!isPathSafe(rel)) return res.status(403).json({ error: 'Ungültig' }); const fp = path.resolve(ROOT, rel); if (!fs.existsSync(fp) || !fs.statSync(fp).isDirectory()) return res.status(400).json({ error: 'Ziel existiert nicht' }); const results = []; for (const f of req.files || []) { if (FILE_PROTECTED.has(f.originalname) && req.user.role !== 'owner') { results.push({ name: f.originalname, success: false, error: 'Geschützt' }); continue; } try { fs.writeFileSync(path.join(fp, f.originalname), f.buffer); results.push({ name: f.originalname, success: true, size: f.size }); } catch (e) { results.push({ name: f.originalname, success: false, error: e.message }); } } addAudit(req.user.username, 'file_upload', { path: rel, count: results.length, ip: req.ip }); addActivity(`⬆️ Upload: ${results.length} Dateien`, 'info'); res.json({ success: true, results }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/files/versions', requireAuth, requirePermission('settings.view'), (req, res) => { try { const rel = req.query.path; if (!rel || !isPathSafe(rel)) return res.status(400).json({ error: 'Ungültig' }); res.json({ path: rel, versions: getFileVersions(path.resolve(ROOT, rel)) }); } catch (e) { res.status(500).json({ error: e.message }); } });
+
+app.post('/api/files/restore', verifyCsrf, requireAuth, requirePermission('settings.edit'), (req, res) => {
+  try { const { path: rel, version } = req.body; if (!rel || version === undefined) return res.status(400).json({ error: 'Pfad/Version erforderlich' }); if (!isPathSafe(rel)) return res.status(403).json({ error: 'Ungültig' }); const r = restoreFileVersion(path.resolve(ROOT, rel), version, req.user.username); if (r.success) { addAudit(req.user.username, 'file_restore', { path: rel, version, ip: req.ip }); addActivity(`↩️ Wiederhergestellt: ${rel} (v${version})`, 'warning'); } res.json(r); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/files/search', requireAuth, requirePermission('settings.view'), (req, res) => {
+  try { const rel = req.query.path || ''; const q = req.query.q || ''; const regex = req.query.regex === 'true'; if (!q) return res.status(400).json({ error: 'Suchbegriff erforderlich' }); if (!isPathSafe(rel)) return res.status(403).json({ error: 'Ungültig' }); const fp = path.resolve(ROOT, rel); if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Nicht gefunden' }); let p; try { p = regex ? new RegExp(q, 'gi') : new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'); } catch (e) { return res.status(400).json({ error: 'Ungültiger Regex' }); } const results = []; const searchIn = (file, relFile) => { if (!isFileEditable(file) || results.length >= 500) return; try { const c = fs.readFileSync(file, 'utf8'); const lines = c.split('\n'); for (let i = 0; i < lines.length && results.length < 500; i++) { if (p.test(lines[i])) results.push({ file: relFile, line: i + 1, content: lines[i].slice(0, 200), match: lines[i].match(p)?.[0] || '' }); p.lastIndex = 0; } } catch (e) {} }; const s = fs.statSync(fp); if (s.isFile()) searchIn(fp, rel); else { const walk = d => { if (results.length >= 500) return; try { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.name.startsWith('.') || e.isSymbolicLink()) continue; const f = path.join(d, e.name); const r = path.relative(ROOT, f); if (e.isDirectory()) { if (r.includes('node_modules') || r.includes('.git')) continue; walk(f); } else if (e.isFile()) searchIn(f, r); } } catch (e) {} }; walk(fp); } res.json({ query: q, count: results.length, results }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+const SNIPPETS_FILE = path.join(ROOT, 'config', 'snippets.json');
+function getSnippets() { return readJSON(SNIPPETS_FILE, { snippets: [{ id: 'lp-default', name: 'LuckPerms Default', category: 'luckperms', content: 'groups:\n  default:\n    permissions: []\n' }, { id: 'lp-vip', name: 'LuckPerms VIP', category: 'luckperms', content: 'groups:\n  vip:\n    weight: 10\n    permissions:\n      - essentials.fly\n      - essentials.nick.color\n' }, { id: 'geyser', name: 'Geyser Config', category: 'geyser', content: 'bedrock:\n  address: 0.0.0.0\n  port: 19132\nremote:\n  address: auto\n  port: 25565\n' }] }); }
+app.get('/api/files/snippets', requireAuth, requirePermission('settings.view'), (req, res) => res.json(getSnippets()));
+app.post('/api/files/snippets', verifyCsrf, requireAuth, requirePermission('settings.edit'), (req, res) => { const { action, snippet } = req.body; const d = getSnippets(); if (action === 'create' && snippet?.name && snippet?.content) { snippet.id = genId(); d.snippets.push(snippet); } else if (action === 'delete') d.snippets = d.snippets.filter(s => s.id !== snippet.id); writeJSON(SNIPPETS_FILE, d); res.json({ success: true, snippets: d.snippets }); });
+app.get('/api/files/templates', requireAuth, (req, res) => res.json({ templates: [{ name: 'LuckPerms Group', content: 'groups:\n  newgroup:\n    weight: 0\n    permissions: []\n' }, { name: 'WorldGuard Region', content: 'regions:\n  newregion:\n    type: cuboid\n    members: {}\n' }] }));
+app.get('/api/files/stats', requireAuth, requirePermission('settings.view'), (req, res) => { try { const stats = { totalSize: 0, fileCount: 0, dirCount: 0, byExtension: {} }; const walk = d => { try { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.name.startsWith('.')) continue; const f = path.join(d, e.name); if (e.isDirectory()) { stats.dirCount++; walk(f); } else if (e.isFile()) { const st = fs.statSync(f); stats.totalSize += st.size; stats.fileCount++; const x = getFileExt(e.name) || 'unknown'; stats.byExtension[x] = (stats.byExtension[x] || 0) + 1; } } } catch (e) {} }; walk(SERVER_DIR); walk(path.join(ROOT, 'config')); res.json({ ...stats, totalSizeFormatted: formatBytes(stats.totalSize) }); } catch (e) { res.status(500).json({ error: e.message }); } });
+
 // Catch-all für SPA
 app.use((req, res) => {
   if (req.path.startsWith('/api/')) {
