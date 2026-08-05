@@ -1,0 +1,11 @@
+[phases.setup]
+nixPkgs = ["nodejs-20_x", "openjdk-21", "tmux", "git"]
+
+[phases.install]
+cmds = ["npm ci --omit=dev"]
+
+[phases.build]
+cmds = ["echo 'Build phase - no compilation needed for Node.js'"]
+
+[start]
+cmd = "node server.js"
